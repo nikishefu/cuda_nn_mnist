@@ -1,17 +1,12 @@
-from math import exp, tanh, ceil
-from random import shuffle
 import warnings
+from math import exp, tanh, ceil
+from time import time
 
 import numpy as np
 from mnist import MNIST
 from numba import cuda, core
 
-import matrix
 import cuda_matrix as cm
-
-
-def get_blocks_per_grid(out_shape, tpb):
-    return ceil(out_shape[0] / tpb[0]), ceil(out_shape[1] / tpb[1])
 
 
 class NeuralNetwork:
@@ -20,190 +15,186 @@ class NeuralNetwork:
 
     def __init__(self, in_nodes, hid_nodes, out_nodes):
 
+        # Each column of data is a single array of input (e.g. a single image from MNIST)
         self.train_data = None
-        self.train_labels = None
+        self.test_data = None
 
-        self.learning_rate = 0.2
-        self.activation = self.sigmoid
+        # Labels for corresponding data
+        self.train_labels = None
+        self.test_labels = None
+
+        # Desired output for corresponding data based on self.train_labels
+        self.train_targets = None
+
+        # Threads per block for cuda
         self.tpb = (8, 8)
-        if out_nodes == 1:
-            self.get_label = self.binary_class
-        else:
-            self.get_label = self.max_class
 
         self.weights = [
-            np.random.rand(hid_nodes, in_nodes) * 2 - 1,
-            np.random.rand(out_nodes, hid_nodes) * 2 - 1]
+            cuda.to_device(np.random.rand(hid_nodes, in_nodes) * 2 - 1),
+            cuda.to_device(np.random.rand(out_nodes, hid_nodes) * 2 - 1)]
 
         self.biases = [
-            np.random.rand(hid_nodes, 1) * 2 - 1,
-            np.random.rand(out_nodes, 1) * 2 - 1]
+            cuda.to_device(np.random.rand(hid_nodes, 1) * 2 - 1),
+            cuda.to_device(np.random.rand(out_nodes, 1) * 2 - 1)]
 
         self.dataset_loaded = False
 
-    def load_dataset(self, ds_path):
-        print("Loading dataset .", end='')
-        self.train_data, self.train_labels = MNIST(ds_path).load_training()  # TODO test data
+    def get_grid_dim(self, out_shape):
+        """Returns cuda grid dimensions needed for kernel execution"""
+        return (ceil(out_shape[0] / self.tpb[0]), ceil(out_shape[1] / self.tpb[1])), self.tpb
+
+    def load_mnist(self, ds_path):
+        """Loads MNIST dataset of training and testing data"""
+
+        print("Loading MNIST dataset .", end='')
+        self.train_data, self.train_labels = MNIST(ds_path).load_training()
+        self.test_data, self.test_labels = MNIST(ds_path).load_testing()
         print('.', end='')
         self.train_data = np.matrix([[i / 255 for i in image] for image in self.train_data]).T
+        self.test_data = np.matrix([[i / 255 for i in image] for image in self.test_data]).T
         print('.', end='')
-        self.labels = np.matrix(self.train_labels)
-        self.train_labels = np.zeros((self.weights[-1].shape[0], self.train_data.shape[1]))
-        for i in range(self.train_labels.shape[1]):
-            self.train_labels[self.labels[0, i], i] = 1
-        print("Done")
+        self.train_labels = np.matrix(self.train_labels)
+        self.test_labels = np.matrix(self.test_labels)
+
+        self.train_targets = np.zeros((self.weights[-1].shape[0], self.train_data.shape[1]))
+        for i in range(self.train_targets.shape[1]):
+            self.train_targets[self.train_labels[0, i], i] = 1
         self.dataset_loaded = True
-
-    def feedforward(self, inputs):
-        hidden = np.add(
-            np.matmul(self.weights[0], inputs),
-            self.biases[0])
-        matrix.map(self.activation[0], hidden)
-
-        output = np.add(
-            np.matmul(self.weights[1], hidden),
-            self.biases[1])
-        matrix.map(self.activation[0], output)
-        return hidden, output
-
-    def feedforward_np(self, inputs):
-        return cm.feedforward_np(
-            cm.feedforward_np(inputs, self.weights[0], self.biases[0]),
-            self.weights[1],
-            self.biases[1]
-        )
+        print(" Done")
 
     def feedforward_cuda(self, inputs):
+        """Returns outputs of NN for each input"""
 
         inputs_d = cuda.to_device(inputs)
-        weights_d = cuda.to_device(self.weights[0])
-        biases_d = cuda.to_device(self.biases[0])
         outputs_d = cuda.device_array((self.weights[0].shape[0], inputs.shape[1]))
 
-        cm.feedforward_step[get_blocks_per_grid(outputs_d.shape, self.tpb), self.tpb](inputs_d, weights_d, biases_d, outputs_d)
+        cm.feedforward_step[self.get_grid_dim(outputs_d.shape)](inputs_d, self.weights[0], self.biases[0], outputs_d)
         cuda.synchronize()
 
         inputs_d = outputs_d
-        weights_d = cuda.to_device(self.weights[1])
-        biases_d = cuda.to_device(self.biases[1])
         outputs_d = cuda.device_array((self.weights[1].shape[0], inputs.shape[1]))
 
-        cm.feedforward_step[get_blocks_per_grid(outputs_d.shape, self.tpb), self.tpb](inputs_d, weights_d, biases_d, outputs_d)
+        cm.feedforward_step[self.get_grid_dim(outputs_d.shape)](inputs_d, self.weights[1], self.biases[1], outputs_d)
         cuda.synchronize()
 
         return outputs_d.copy_to_host()
 
-    def max_class(self, inputs):
-        output = list(self.feedforward_cuda(inputs))
-        return output.index(max(output))
-
-    def binary_class(self, inputs):
-        return int(self.feedforward(inputs)[1][0, 0] >= 0.5)
-
     def test_accuracy(self):
+        """Returns categorical accuracy of NN on self.test_data"""
+
+        output = self.feedforward_cuda(self.test_data)
+        return (output.argmax(axis=0) == self.test_labels[0, :]).sum() / self.test_data.shape[1] * 100
+
+    def train_accuracy(self):
+        """Returns categorical accuracy of NN on self.train_data"""
+
         output = self.feedforward_cuda(self.train_data)
-        print(f"Accuracy: {round((output.argmax(axis=0) == self.labels[0, :]).sum() / self.train_data.shape[1] * 100, 5)}%")
+        return (output.argmax(axis=0) == self.train_labels[0, :]).sum() / self.train_data.shape[1] * 100
 
-    def backpropogation(self, inputs, target, lr):
-        hidden, output = self.feedforward(inputs)
-
-        error = np.subtract(target, output)
-        hidden_error = np.matmul(self.weights[1].T, error)
-
-        matrix.map(self.activation[1], output)
-        output = (np.multiply(output, error) * lr)
-
-        for i in range(output.shape[1]):
-            self.weights[1] += np.matmul(output[:, i], hidden.T[i, :])
-        self.biases[1] += output.sum(axis=1)
-
-        matrix.map(self.activation[1], hidden)
-        hidden = (np.multiply(hidden, hidden_error) * lr)
-
-        for i in range(hidden.shape[1]):
-            self.weights[0] += np.matmul(hidden[:, i], inputs.T[i, :])
-        self.biases[0] += hidden.sum(axis=1)
+    def print_accuracy(self):
+        print(f"Test accuracy: {round(self.test_accuracy(), 2)}%")
+        print(f"Train accuracy: {round(self.train_accuracy(), 2)}%")
 
     def backpropogation_cuda(self, inputs, targets, lr):
+        """
+        Implements batch gradient descent.
+        Each column of targets is desired output of NN for each input
+        """
         inputs_d = cuda.to_device(inputs)
-        weights_d = cuda.to_device(self.weights[0])
-        biases_d = cuda.to_device(self.biases[0])
         hidden_d = cuda.device_array((self.weights[0].shape[0], inputs.shape[1]))
 
-        cm.feedforward_step[get_blocks_per_grid(hidden_d.shape, self.tpb), self.tpb](inputs_d, weights_d, biases_d, hidden_d)
+        cm.feedforward_step[self.get_grid_dim(hidden_d.shape)](inputs_d, self.weights[0], self.biases[0], hidden_d)
         cuda.synchronize()
 
         inputs_d = hidden_d
-        weights_d = cuda.to_device(self.weights[1])
-        biases_d = cuda.to_device(self.biases[1])
         outputs_d = cuda.device_array((self.weights[1].shape[0], inputs.shape[1]))
 
-        cm.feedforward_step[get_blocks_per_grid(outputs_d.shape, self.tpb), self.tpb](inputs_d, weights_d, biases_d, outputs_d)
+        cm.feedforward_step[self.get_grid_dim(outputs_d.shape)](inputs_d, self.weights[1], self.biases[1], outputs_d)
         cuda.synchronize()
 
         errors_d = cuda.device_array(targets.shape)
         targets_d = cuda.to_device(targets)
         hidden_errors_d = cuda.device_array((self.weights[1].shape[1], errors_d.shape[1]))
 
-        cm.subtract[get_blocks_per_grid(errors_d.shape, self.tpb), self.tpb](targets_d, outputs_d, errors_d)
+        cm.subtract[self.get_grid_dim(errors_d.shape)](targets_d, outputs_d, errors_d)
         cuda.synchronize()
 
-        cm.matmul[get_blocks_per_grid(hidden_errors_d.shape, self.tpb), self.tpb](weights_d.transpose(), errors_d, hidden_errors_d)
+        cm.matmul[self.get_grid_dim(hidden_errors_d.shape)](self.weights[1].transpose(), errors_d, hidden_errors_d)
         cuda.synchronize()
 
         gradient_d = cuda.device_array(outputs_d.shape)
-        cm.gradient[get_blocks_per_grid(gradient_d.shape, self.tpb), self.tpb](outputs_d, errors_d, lr, gradient_d)
+        cm.gradient[self.get_grid_dim(gradient_d.shape)](outputs_d, errors_d, lr, gradient_d)
         cuda.synchronize()
 
         delta_b_d = cuda.device_array(self.biases[1].shape)
         cm.sum_cols[ceil(self.biases[1].shape[0] / 4), 4](gradient_d, delta_b_d)
         cuda.synchronize()
 
-        self.biases[1] += delta_b_d.copy_to_host()
+        cm.add[self.get_grid_dim(self.biases[1].shape)](self.biases[1], delta_b_d)
 
         delta_w_d = cuda.device_array((gradient_d.shape[0], hidden_d.shape[0]))
-        cm.matmul[get_blocks_per_grid(self.weights[1].shape, self.tpb), self.tpb](gradient_d, hidden_d.transpose(), delta_w_d)
+        cm.matmul[self.get_grid_dim(self.weights[1].shape)](gradient_d, hidden_d.transpose(), delta_w_d)
         cuda.synchronize()
 
-        self.weights[1] += delta_w_d.copy_to_host()
+        cm.add[self.get_grid_dim(self.weights[1].shape)](self.weights[1], delta_w_d)
 
         gradient_d = cuda.device_array(hidden_d.shape)
-        cm.gradient[get_blocks_per_grid(gradient_d.shape, self.tpb), self.tpb](hidden_d, hidden_errors_d, lr, gradient_d)
+        cm.gradient[self.get_grid_dim(gradient_d.shape)](hidden_d, hidden_errors_d, lr, gradient_d)
         cuda.synchronize()
 
         delta_b_d = cuda.device_array(self.biases[0].shape)
         cm.sum_cols[ceil(self.biases[0].shape[0] / 4), 4](gradient_d, delta_b_d)
         cuda.synchronize()
 
-        self.biases[0] += delta_b_d.copy_to_host()
+        cm.add[self.get_grid_dim(self.biases[0].shape)](self.biases[0], delta_b_d)
 
         delta_w_d = cuda.device_array((gradient_d.shape[0], inputs.shape[0]))
         inputs_d = cuda.to_device(inputs.T)
-        cm.matmul[get_blocks_per_grid(self.weights[0].shape, self.tpb), self.tpb](gradient_d, inputs_d, delta_w_d)
+        cm.matmul[self.get_grid_dim(self.weights[0].shape)](gradient_d, inputs_d, delta_w_d)
         cuda.synchronize()
 
-        self.weights[0] += delta_w_d.copy_to_host()
+        cm.add[self.get_grid_dim(self.weights[0].shape)](self.weights[0], delta_w_d)
 
-    def train_batch(self, repeat, lr, batch_size):
-        for r in range(repeat):
-            print(f"\r{r + 1} / {repeat}", end='')
-            perm = np.random.permutation(self.train_labels.shape[1])
-            for i in range(ceil(perm.size / batch_size)):
-                batch_perm = perm[i * batch_size : (i + 1) * batch_size]
-                self.backpropogation_cuda(self.train_data[:, batch_perm], self.train_labels[:, batch_perm], lr)
-        print()
+    def train(self, epochs: int, learning_rate: float, batch_size: int):
+        """
+        Train neural network on a dataset, divided into batches.
+        Weights are corrected after each batch
+        """
+        for r in range(epochs):
+            start_time = time()
 
-    def export_weights(self):
-        pass
+            perm = np.random.permutation(self.train_targets.shape[1])
+            batch_count = ceil(perm.size / batch_size)
+            for i in range(batch_count):
+                print(f"\rEpoch: {r + 1} / {epochs} [{('#' * ((i + 1) * 20 // batch_count)).ljust(20, ' ')}] {round(time() - start_time, 1)}s", end='')
+                batch_perm = perm[i * batch_size: (i + 1) * batch_size]
+                self.backpropogation_cuda(self.train_data[:, batch_perm], self.train_targets[:, batch_perm], learning_rate)
 
-    def load_weights(self):
-        pass
+            print()
+            self.print_accuracy()
+            print()
+
+    def save_weights(self, filename: str):
+        """Save weights to weights directory as an .npz archive"""
+        np.savez_compressed(f"weights/{filename}",
+                            *[self.weights[i].copy_to_host() for i in range(len(self.weights))],
+                            *[self.biases[i].copy_to_host() for i in range(len(self.biases))])
+
+    def load_weights(self, filename: str):
+        """Load weights stored as an .npz archive from weights directory"""
+        loaded = np.load(f"weights/{filename}.npz")
+        self.weights = [loaded['arr_0'], loaded['arr_1']]
+        self.biases = [loaded['arr_2'], loaded['arr_3']]
 
 
 if __name__ == '__main__':
+    # Silence Numba warnings about low occupancy of GPU
     warnings.simplefilter('ignore', category=core.errors.NumbaPerformanceWarning)
+
     dc = NeuralNetwork(784, 64, 10)
-    dc.load_dataset('dataset')
+    dc.load_mnist('dataset')
+
+    # # Dataset for xor problem
     # dc.train_data = np.matrix([[0, 0],
     #                            [1, 1],
     #                            [0, 1],
@@ -211,6 +202,11 @@ if __name__ == '__main__':
     # dc.train_labels = np.array([[0, 0, 1, 1]])
     # dc.dataset_loaded = True
 
-    while True:
-        dc.test_accuracy()
-        dc.train_batch(1, 0.00001, 1024)
+    dc.print_accuracy()
+    print()
+
+    # dc.load_weights('weights1')
+    # dc.print_accuracy()
+
+    dc.train(5, 0.01, 1024)
+    # dc.save_weights('weights1')
