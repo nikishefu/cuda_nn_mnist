@@ -47,7 +47,10 @@ class NeuralNetwork:
         print('.', end='')
         self.train_data = np.matrix([[i / 255 for i in image] for image in self.train_data]).T
         print('.', end='')
-        self.train_labels = np.matrix(self.train_labels)
+        self.labels = np.matrix(self.train_labels)
+        self.train_labels = np.zeros((self.weights[-1].shape[0], self.train_data.shape[1]))
+        for i in range(self.train_labels.shape[1]):
+            self.train_labels[self.labels[0, i], i] = 1
         print("Done")
         self.dataset_loaded = True
 
@@ -99,7 +102,7 @@ class NeuralNetwork:
 
     def test_accuracy(self):
         output = self.feedforward_cuda(self.train_data)
-        print(f"Accuracy: {round((output.argmax(axis=0) == self.train_labels[0, :]).sum() / self.train_data.shape[1] * 100, 5)}%")
+        print(f"Accuracy: {round((output.argmax(axis=0) == self.labels[0, :]).sum() / self.train_data.shape[1] * 100, 5)}%")
 
     def backpropogation(self, inputs, target, lr):
         hidden, output = self.feedforward(inputs)
@@ -181,31 +184,13 @@ class NeuralNetwork:
 
         self.weights[0] += delta_w_d.copy_to_host()
 
-    def train(self, repeat, lr):
-        for r in range(repeat):
-            print(f"\r{r + 1} / {repeat}", end='')
-            indexes = list(range(self.train_data.shape[1]))
-            shuffle(indexes)
-            for i in indexes:
-                target = np.zeros((self.weights[-1].shape[0], 1))
-                if target.shape[0] == 1:
-                    target[0, 0] = self.train_labels[:, i]
-                else:
-                    target[self.train_labels[:, i], 0] = 1
-                self.backpropogation(self.train_data[:, i], target, lr)
-        print()
-
-    def train_batch(self, repeat, lr):
+    def train_batch(self, repeat, lr, batch_size):
         for r in range(repeat):
             print(f"\r{r + 1} / {repeat}", end='')
             perm = np.random.permutation(self.train_labels.shape[1])
-            if self.weights[-1].shape[0] == 1:
-                self.backpropogation_cuda(self.train_data[:, perm], self.train_labels[:, perm], lr)
-            else:
-                targets = np.zeros((self.weights[-1].shape[0], self.train_data.shape[1]))
-                for i in range(targets.shape[1]):
-                    targets[self.train_labels[0, i], i] = 1
-                self.backpropogation_cuda(self.train_data[:, perm], targets[:, perm], lr)
+            for i in range(ceil(perm.size / batch_size)):
+                batch_perm = perm[i * batch_size : (i + 1) * batch_size]
+                self.backpropogation_cuda(self.train_data[:, batch_perm], self.train_labels[:, batch_perm], lr)
         print()
 
     def export_weights(self):
@@ -227,6 +212,5 @@ if __name__ == '__main__':
     # dc.dataset_loaded = True
 
     while True:
-        print(dc.weights[0][0, 0])
         dc.test_accuracy()
-        dc.train_batch(10, 0.000001)
+        dc.train_batch(1, 0.00001, 1024)
