@@ -15,7 +15,8 @@ class NeuralNetwork:
 
     def __init__(self, in_nodes, hid_nodes, out_nodes):
 
-        # Each column of data is a single array of input (e.g. a single image from MNIST)
+        # Each column of data is a single array of input
+        # (e.g. a single image from MNIST)
         self.train_data = None
         self.test_data = None
 
@@ -41,7 +42,8 @@ class NeuralNetwork:
 
     def get_grid_dim(self, out_shape):
         """Returns cuda grid dimensions needed for kernel execution"""
-        return (ceil(out_shape[0] / self.tpb[0]), ceil(out_shape[1] / self.tpb[1])), self.tpb
+        return (ceil(out_shape[0] / self.tpb[0]),
+                ceil(out_shape[1] / self.tpb[1])), self.tpb
 
     def load_mnist(self, ds_path):
         """Loads MNIST dataset of training and testing data"""
@@ -50,13 +52,16 @@ class NeuralNetwork:
         self.train_data, self.train_labels = MNIST(ds_path).load_training()
         self.test_data, self.test_labels = MNIST(ds_path).load_testing()
         print('.', end='')
-        self.train_data = np.matrix([[i / 255 for i in image] for image in self.train_data]).T
-        self.test_data = np.matrix([[i / 255 for i in image] for image in self.test_data]).T
+        self.train_data = np.matrix([[i / 255 for i in image]
+                                     for image in self.train_data]).T
+        self.test_data = np.matrix([[i / 255 for i in image]
+                                    for image in self.test_data]).T
         print('.', end='')
         self.train_labels = np.matrix(self.train_labels)
         self.test_labels = np.matrix(self.test_labels)
 
-        self.train_targets = np.zeros((self.weights[-1].shape[0], self.train_data.shape[1]))
+        self.train_targets = np.zeros((self.weights[-1].shape[0],
+                                       self.train_data.shape[1]))
         for i in range(self.train_targets.shape[1]):
             self.train_targets[self.train_labels[0, i], i] = 1
         self.dataset_loaded = True
@@ -66,13 +71,15 @@ class NeuralNetwork:
         """Returns outputs of NN for each input"""
 
         inputs_d = cuda.to_device(inputs)
-        outputs_d = cuda.device_array((self.weights[0].shape[0], inputs.shape[1]))
+        outputs_d = cuda.device_array((self.weights[0].shape[0],
+                                       inputs.shape[1]))
 
         cm.feedforward_step[self.get_grid_dim(outputs_d.shape)](inputs_d, self.weights[0], self.biases[0], outputs_d)
         cuda.synchronize()
 
         inputs_d = outputs_d
-        outputs_d = cuda.device_array((self.weights[1].shape[0], inputs.shape[1]))
+        outputs_d = cuda.device_array((self.weights[1].shape[0],
+                                       inputs.shape[1]))
 
         cm.feedforward_step[self.get_grid_dim(outputs_d.shape)](inputs_d, self.weights[1], self.biases[1], outputs_d)
         cuda.synchronize()
@@ -154,6 +161,7 @@ class NeuralNetwork:
         cuda.synchronize()
 
         cm.add[self.get_grid_dim(self.weights[0].shape)](self.weights[0], delta_w_d)
+        cuda.synchronize()
 
     def train(self, epochs: int, learning_rate: float, batch_size: int):
         """
@@ -166,9 +174,14 @@ class NeuralNetwork:
             perm = np.random.permutation(self.train_targets.shape[1])
             batch_count = ceil(perm.size / batch_size)
             for i in range(batch_count):
-                print(f"\rEpoch: {r + 1} / {epochs} [{('#' * ((i + 1) * 20 // batch_count)).ljust(20, ' ')}] {round(time() - start_time, 1)}s", end='')
+                pr_bar = ('#' * ((i + 1) * 20 // batch_count)).ljust(20, ' ')
+                dur = round(time() - start_time, 1)
+                print(f"\rEpoch: {r + 1} / {epochs} [{pr_bar}] {dur}s", end='')
+
                 batch_perm = perm[i * batch_size: (i + 1) * batch_size]
-                self.backpropogation_cuda(self.train_data[:, batch_perm], self.train_targets[:, batch_perm], learning_rate)
+                self.backpropogation_cuda(self.train_data[:, batch_perm],
+                                          self.train_targets[:, batch_perm],
+                                          learning_rate)
 
             print()
             self.print_accuracy()
@@ -177,8 +190,10 @@ class NeuralNetwork:
     def save_weights(self, filename: str):
         """Save weights to weights directory as an .npz archive"""
         np.savez_compressed(f"weights/{filename}",
-                            *[self.weights[i].copy_to_host() for i in range(len(self.weights))],
-                            *[self.biases[i].copy_to_host() for i in range(len(self.biases))])
+                            *[self.weights[i].copy_to_host()
+                              for i in range(len(self.weights))],
+                            *[self.biases[i].copy_to_host()
+                              for i in range(len(self.biases))])
 
     def load_weights(self, filename: str):
         """Load weights stored as an .npz archive from weights directory"""
@@ -189,7 +204,8 @@ class NeuralNetwork:
 
 if __name__ == '__main__':
     # Silence Numba warnings about low occupancy of GPU
-    warnings.simplefilter('ignore', category=core.errors.NumbaPerformanceWarning)
+    warnings.simplefilter('ignore',
+                          category=core.errors.NumbaPerformanceWarning)
 
     dc = NeuralNetwork(784, 64, 10)
     dc.load_mnist('dataset')

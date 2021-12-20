@@ -44,10 +44,10 @@ def feedforward_step(inputs, weights, biases, outputs):
 
 
 @cuda.jit
-def gradient(outputs, errors, lr, gradients):
+def gradient(outputs, err, lr, gradients):
     x, batch = cuda.grid(2)
     if x < outputs.shape[0] and batch < outputs.shape[1]:
-        gradients[x, batch] = dsigmoid(outputs[x, batch]) * errors[x, batch] * lr
+        gradients[x, batch] = dsigmoid(outputs[x, batch]) * err[x, batch] * lr
 
 
 @cuda.jit
